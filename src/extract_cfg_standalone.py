@@ -26,12 +26,11 @@ def extract_cfg_from_db(db_path, output_path=None):
     print(f"Opening database: {db_path}")
     
     # Initialize IDA in headless mode
-    # For idapro >= 9.0, we use idapro.open_database
     try:
         print("Attempting to open database...")
         db_handle = idapro.open_database(db_path, run_auto_analysis=True)
         if db_handle != 0:
-            print("Failed to open database: open_database returned 0")
+            print(f"Failed to open database: open_database returned {db_handle}.")
             return None
             
         print(f"Database opened with handle: {db_handle}")
@@ -100,17 +99,18 @@ def extract_cfg_from_db(db_path, output_path=None):
             json.dump(cfg, f, indent=4)
         
         print(f"CFG exported to {output_path}")
+        print("Closing database...")
+        idapro.close_database(db_handle)
         return output_path
 
     except Exception as e:
         print(f"Error during extraction: {e}")
         import traceback
         traceback.print_exc()
+        print("Closing database...")
+        idapro.close_database(db_handle)
         return None
 
-def extract_cfg_from_db_old(db_path, output_path=None):
-    # Keeping the old one just in case as a fallback
-    pass
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:

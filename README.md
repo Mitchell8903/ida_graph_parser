@@ -6,9 +6,9 @@ This project provides a set of scripts to extract and visualize a full program C
 
 - `src/extract_cfg.py`: IDA Python script to be run inside IDA Pro.
 - `src/extract_cfg_standalone.py`: Standalone Python script for direct database extraction.
-- `src/visualize_cfg.py`: Python script to visualize the exported CFG data.
-- `pyproject.toml` / `requirements.txt`: Project dependencies.
-- `sample.ipynb`: Jupyter Notebook for interactive analysis.
+- `src/visualize_cfg.py`: Python script to prepare CFG data for visualization.
+- `pyproject.toml` / `requirements.txt`: Project dependencies (now using `ipysigma`).
+- `sample.ipynb`: Jupyter Notebook for interactive visualization with `ipysigma`.
 
 ## Usage
 
@@ -65,6 +65,8 @@ python3 -m src.visualize_cfg your_database_cfg.json
 - IDA Pro (9.0+ for standalone extraction) with IDAPYTHON support.
 - Python 3.14+
 - `idapro` (for standalone extraction)
+- `ipysigma`
 - `networkx`
+- `pandas`
 - `matplotlib`
 - `pydot` (optional, for DOT export)

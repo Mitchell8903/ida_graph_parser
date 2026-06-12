@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 import json
-import networkx as nx
-import matplotlib.pyplot as plt
 import argparse
 import os
+import networkx as nx
 
 def load_cfg(json_path):
+    """
+    Loads CFG from JSON and returns a networkx DiGraph.
+    """
     if not os.path.exists(json_path):
         print(f"Error: File {json_path} not found.")
         return None
@@ -17,10 +19,14 @@ def load_cfg(json_path):
 
     # Add nodes (basic blocks)
     for func_ea_str, func_data in data['functions'].items():
-        func_ea = int(func_ea_str)
         for block in func_data['blocks']:
-            block_label = f"{func_data['name']}\n{hex(block['start'])}"
-            G.add_node(block['start'], label=block_label, func=func_data['name'])
+            block_label = f"{func_data['name']} @ {hex(block['start'])}"
+            G.add_node(
+                block['start'],
+                label=block_label,
+                func=func_data['name'],
+                color="skyblue"
+            )
 
     # Add edges
     for edge in data['edges']:
@@ -28,39 +34,59 @@ def load_cfg(json_path):
         dst = edge['dst']
         
         # Ensure nodes exist
-        if not G.has_node(src):
-            G.add_node(src, label=hex(src), func="unknown")
-        if not G.has_node(dst):
-            G.add_node(dst, label=hex(dst), func="unknown")
+        if src not in G:
+            G.add_node(src, label=hex(src), func="unknown", color="gray")
+        if dst not in G:
+            G.add_node(dst, label=hex(dst), func="unknown", color="gray")
             
         G.add_edge(src, dst, type=edge['type'])
 
     return G
 
+def collapse_chains(G):
+    """
+    Collapses nodes that have exactly one predecessor and one successor.
+    The node is removed, and an edge is created between its predecessor and successor.
+    """
+    collapsed_G = G.copy()
+    nodes_to_process = list(collapsed_G.nodes())
+    
+    while True:
+        changed = False
+        for node in nodes_to_process:
+            if node not in collapsed_G:
+                continue
+            
+            # Check if node has exactly one predecessor and one successor
+            if collapsed_G.in_degree(node) == 1 and collapsed_G.out_degree(node) == 1:
+                preds = list(collapsed_G.predecessors(node))
+                succs = list(collapsed_G.successors(node))
+                
+                pred = preds[0]
+                succ = succs[0]
+                
+                # Avoid creating self-loops if not desired, or handle them
+                if pred != node and succ != node:
+                    # Optional: transfer edge attributes if needed
+                    # Here we just create a simple edge
+                    collapsed_G.add_edge(pred, succ)
+                    collapsed_G.remove_node(node)
+                    changed = True
+                    break # Restart to avoid issues with iterator after modification
+        
+        if not changed:
+            break
+            
+    return collapsed_G
+
 def visualize_cfg(json_path):
     G = load_cfg(json_path)
-    if not G:
+    if G is None:
         return
 
-    print(f"Graph loaded: {G.number_of_nodes()} nodes, {G.number_of_edges()} edges")
-
-    # Simple visualization for small graphs
-    if G.number_of_nodes() < 100:
-        pos = nx.spring_layout(G)
-        labels = nx.get_node_attributes(G, 'label')
-        nx.draw(G, pos, labels=labels, with_labels=True, node_size=2000, node_color="skyblue", font_size=8)
-        plt.show()
-    else:
-        print("Graph too large for simple spring layout visualization. Consider exporting to Graphviz.")
-        
-    # Export to DOT for better visualization
-    try:
-        from networkx.drawing.nx_pydot import write_dot
-        dot_path = os.path.splitext(json_path)[0] + ".dot"
-        write_dot(G, dot_path)
-        print(f"Graph exported to {dot_path}")
-    except ImportError:
-        print("pydot not installed, skipping DOT export.")
+    print(f"Graph loaded: {len(G.nodes)} nodes, {len(G.edges)} edges")
+    print("ipysigma is designed for interactive environments (Jupyter).")
+    print("To visualize this graph, use the provided sample.ipynb.")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Visualize CFG exported from IDA")

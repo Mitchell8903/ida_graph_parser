@@ -7,7 +7,9 @@ dependencies = [
     "jupyterlab>=4.5.8",
     "matplotlib>=3.11.0",
     "pandas>=3.0.3",
-    "networkx>=3.0",
+    "networkx",
     "pydot>=3.0.1",
     "idapro>=0.0.9",
+    "ipysigma",
+    "pandas-stubs~=3.0.3",
 ]
