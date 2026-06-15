@@ -76,7 +76,7 @@ def extract_cfg_from_db(db_path, output_path=None):
                     is_cond = (num_succs > 1)
 
                     for succ in block.get_successors():
-                        cfg["functions"][str(func_ea)]["edges"].append({
+                        cfg["edges"].append({
                             "src": block.start_ea,
                             "dst": succ.start_ea,
                             "type": "intra-function",
@@ -114,6 +114,14 @@ def extract_cfg_from_db(db_path, output_path=None):
                             "conditional": False
                         })
                     else:
+                        if "main" in func.name.lower():
+                            print(f"Found non-call link to main {xref.to_ea} from {source_func.name} @ {hex(source_func.start_ea)}")
+                        cfg["edges"].append({
+                            "src": src_block_ea,
+                            "dst": xref.to_ea,
+                            "type": "non-call",
+                            "conditional": False
+                        })
                         cfg["functions"][str(func_ea)]["non_call_links"] = True
 
 
