@@ -4,6 +4,37 @@ import idaapi
 import json
 import os
 import sys
+from dataclasses import dataclass, field
+from typing import List, Optional
+
+from ida_domain.flowchart import FlowChartFlags
+
+
+@dataclass
+class FuncNodeInfo:
+    name: str
+    start_ea: int
+    end_ea: int
+    entry_point: bool = False
+    imported: bool = False
+    module: Optional[str] = None
+    non_call_links: bool = False
+    blocks: List[dict] = field(default_factory=list)
+    edges: List[dict] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {
+            "name": self.name,
+            "start_ea": self.start_ea,
+            "end_ea": self.end_ea,
+            "entry_point": self.entry_point,
+            "imported": self.imported,
+            "module": self.module,
+            "non_call_links": self.non_call_links,
+            "blocks": self.blocks,
+            "edges": self.edges,
+        }
+
 
 def extract_cfg_from_db(db_path, output_path=None):
     """
@@ -30,30 +61,41 @@ def extract_cfg_from_db(db_path, output_path=None):
 
             print(f"Number of functions found: {len(db.functions)}")
 
+            print("Extracting imported functions...")
+            import_addresses = {}
+            for imp in db.imports.get_all_imports():
+                imp_name = imp.name if imp.has_name() else f"{imp.module_name}!#{imp.ordinal}"
+                import_addresses[imp.address] = imp_name
+                cfg["functions"][str(imp.address)] = FuncNodeInfo(
+                    name=imp_name,
+                    start_ea=imp.address,
+                    end_ea=imp.address,
+                    entry_point=False,
+                    imported=True,
+                    module=imp.module_name,
+                ).to_dict()
+            print(f"Found {len(import_addresses)} imported functions.")
+
             print("Extracting functions and intra-function edges...")
             functions_found = 0
             entry_found = False
             for func in db.functions:
                 functions_found += 1
                 func_ea = func.start_ea
-                func_name = db.functions.get_name(func)
-                func_node_info = {
-                    "name": func_name,
-                    "start_ea": func.start_ea,
-                    "end_ea": func.end_ea,
-                    "entry_point": func_ea in entry_addresses,
-                    "non_call_links": False,
-                    "blocks": [],
-                    "edges": []
-                }
+                func_name = func.name
+                func_node_info = FuncNodeInfo(
+                    name=func_name,
+                    start_ea=func.start_ea,
+                    end_ea=func.end_ea,
+                    entry_point=func_ea in entry_addresses,
+                ).to_dict()
                 # Use string representation of EA for JSON keys
                 cfg["functions"][str(func_ea)] = func_node_info
                 if func_node_info["entry_point"]:
                     entry_found = True
 
-
                 # Get flowchart for the function
-                fc = db.functions.get_flowchart(func)
+                fc = db.functions.get_flowchart(func, flags=FlowChartFlags.NOEXT)
                 if not fc:
                     # If no flowchart, still add the function start as a block 
                     # so it's not missing from the graph nodes.
@@ -68,8 +110,12 @@ def extract_cfg_from_db(db_path, output_path=None):
                     cfg["functions"][str(func_ea)]["blocks"].append({
                         "start": block.start_ea,
                         "end": block.end_ea,
-                        "id": block.id
+                        "id": block.id,
                     })
+                    retrieved = db.functions.get_at(block.start_ea)
+                    if not retrieved == func:
+                        continue
+                    #assert retrieved == func, f"Block {hex(block.start_ea)} belongs to {retrieved.name} @ {hex(retrieved.start_ea)} not {func_name} @ {hex(func_ea)}"
                     
                     # Determine if the exit from this block is conditional
                     num_succs = block.count_successors()
@@ -86,8 +132,13 @@ def extract_cfg_from_db(db_path, output_path=None):
             print(f"Found {functions_found} functions.")
             if not entry_found:
                 print("Warning: No entry points found among the functions. Check if the database is properly analyzed.")
+
             # Add inter-function edges (calls)
             print("Extracting inter-function calls...")
+
+            # Also check xrefs to imported function addresses
+            import_target_eas = list(import_addresses.keys())
+
             for func in db.functions:
 
                 for xref in db.xrefs.to_ea(func.start_ea):
@@ -96,17 +147,15 @@ def extract_cfg_from_db(db_path, output_path=None):
                     source_chunk = db.functions.get_chunk_at(source)
                     if not source_func or not source_chunk:
                         continue
-
+                    # Find the specific block that contains the call for more accurate CFG
+                    src_block_ea = source_chunk.start_ea
+                    source_fc = db.functions.get_flowchart(source_func)
+                    if source_fc:
+                        for b in source_fc:
+                            if b.start_ea <= source < b.end_ea:
+                                src_block_ea = b.start_ea
+                                break
                     if xref.is_call:
-                        # Find the specific block that contains the call for more accurate CFG
-                        src_block_ea = source_chunk.start_ea
-                        source_fc = db.functions.get_flowchart(source_func)
-                        if source_fc:
-                            for b in source_fc:
-                                if b.start_ea <= source < b.end_ea:
-                                    src_block_ea = b.start_ea
-                                    break
-
                         cfg["edges"].append({
                             "src": src_block_ea,
                             "dst": xref.to_ea,
@@ -122,8 +171,30 @@ def extract_cfg_from_db(db_path, output_path=None):
                             "type": "non-call",
                             "conditional": False
                         })
-                        cfg["functions"][str(xref.to_ea)]["non_call_links"] = True
-                        cfg["functions"][str(src_block_ea)]["non_call_links"] = True
+            # Add edges for calls to imported functions
+            print("Extracting calls to imported functions...")
+            for imp_ea in import_target_eas:
+                for xref in db.xrefs.to_ea(imp_ea):
+                    if not xref.is_call:
+                        continue
+                    source = xref.from_ea
+                    source_func = db.functions.get_at(source)
+                    source_chunk = db.functions.get_chunk_at(source)
+                    if not source_func or not source_chunk:
+                        continue
+                    src_block_ea = source_chunk.start_ea
+                    source_fc = db.functions.get_flowchart(source_func)
+                    if source_fc:
+                        for b in source_fc:
+                            if b.start_ea <= source < b.end_ea:
+                                src_block_ea = b.start_ea
+                                break
+                    cfg["edges"].append({
+                        "src": src_block_ea,
+                        "dst": imp_ea,
+                        "type": "imported-function",
+                        "conditional": False
+                    })
 
 
             # Save to file

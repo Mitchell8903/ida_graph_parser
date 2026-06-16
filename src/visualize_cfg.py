@@ -64,7 +64,6 @@ def load_cfg(json_path) -> nx.DiGraph:
                 color=node_color,
                 entry_point=func_data['entry_point'],
                 non_call_links=func_data['non_call_links'],
-
             )
 
     # Add edges
@@ -83,11 +82,13 @@ def load_cfg(json_path) -> nx.DiGraph:
                     color = get_function_color(func_name, func_colors)
                     G.add_node(node_ea, label=label, func=func_name, color=color)
                 else:
-                    G.add_node(node_ea, label=hex(node_ea), func="unknown",
+                    G.add_node(node_ea, label=f"unknown @ {hex(node_ea)}", func="unknown",
                                color=get_function_color("unknown", func_colors))
 
         G.add_edge(src, dst, type=edge['type'], conditional=edge.get('conditional', False))
-
+        if edge['type'] == 'non-call':
+            G.nodes[src]['non_call_links'] = True
+            G.nodes[dst]['non_call_links'] = True
     return G
 
 
