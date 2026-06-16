@@ -25,8 +25,8 @@ class FuncNodeInfo:
     def to_dict(self) -> dict:
         return {
             "name": self.name,
-            "start_ea": self.start_ea,
-            "end_ea": self.end_ea,
+            "start_ea": hex(self.start_ea),
+            "end_ea": hex(self.end_ea),
             "entry_point": self.entry_point,
             "imported": self.imported,
             "module": self.module,
@@ -66,7 +66,7 @@ def extract_cfg_from_db(db_path, output_path=None):
             for imp in db.imports.get_all_imports():
                 imp_name = imp.name if imp.has_name() else f"{imp.module_name}!#{imp.ordinal}"
                 import_addresses[imp.address] = imp_name
-                cfg["functions"][str(imp.address)] = FuncNodeInfo(
+                cfg["functions"][hex(imp.address)] = FuncNodeInfo(
                     name=imp_name,
                     start_ea=imp.address,
                     end_ea=imp.address,
@@ -90,7 +90,7 @@ def extract_cfg_from_db(db_path, output_path=None):
                     entry_point=func_ea in entry_addresses,
                 ).to_dict()
                 # Use string representation of EA for JSON keys
-                cfg["functions"][str(func_ea)] = func_node_info
+                cfg["functions"][hex(func_ea)] = func_node_info
                 if func_node_info["entry_point"]:
                     entry_found = True
 
@@ -99,18 +99,23 @@ def extract_cfg_from_db(db_path, output_path=None):
                 if not fc:
                     # If no flowchart, still add the function start as a block 
                     # so it's not missing from the graph nodes.
-                    cfg["functions"][str(func_ea)]["blocks"].append({
-                        "start": func.start_ea,
-                        "end": func.end_ea,
+                    cfg["functions"][hex(func_ea)]["blocks"].append({
+                        "start": hex(func.start_ea),
+                        "end": hex(func.end_ea),
                         "id": 0
                     })
                     continue
                 
                 for block in fc:
-                    cfg["functions"][str(func_ea)]["blocks"].append({
-                        "start": block.start_ea,
-                        "end": block.end_ea,
+                    instrs = list(db.instructions.get_between(block.start_ea, block.end_ea))
+                    cfg["functions"][hex(func_ea)]["blocks"].append({
+                        "start": hex(block.start_ea),
+                        "end": hex(block.end_ea),
                         "id": block.id,
+                        "instructions": [
+                             db.instructions.get_disassembly(insn)
+                            for insn in instrs
+                        ]
                     })
                     retrieved = db.functions.get_at(block.start_ea)
                     if not retrieved == func:
@@ -123,8 +128,8 @@ def extract_cfg_from_db(db_path, output_path=None):
 
                     for succ in block.get_successors():
                         cfg["edges"].append({
-                            "src": block.start_ea,
-                            "dst": succ.start_ea,
+                            "src": hex(block.start_ea),
+                            "dst": hex(succ.start_ea),
                             "type": "intra-function",
                             "conditional": bool(is_cond)
                         })
@@ -157,8 +162,8 @@ def extract_cfg_from_db(db_path, output_path=None):
                                 break
                     if xref.is_call:
                         cfg["edges"].append({
-                            "src": src_block_ea,
-                            "dst": xref.to_ea,
+                            "src": hex(src_block_ea),
+                            "dst": hex(xref.to_ea),
                             "type": "inter-function",
                             "conditional": False
                         })
@@ -166,8 +171,8 @@ def extract_cfg_from_db(db_path, output_path=None):
                         if "main" in func.name.lower():
                             print(f"Found non-call link to main {xref.to_ea} from {source_func.name} @ {hex(source_func.start_ea)}")
                         cfg["edges"].append({
-                            "src": src_block_ea,
-                            "dst": xref.to_ea,
+                            "src": hex(src_block_ea),
+                            "dst": hex(xref.to_ea),
                             "type": "non-call",
                             "conditional": False
                         })
@@ -190,8 +195,8 @@ def extract_cfg_from_db(db_path, output_path=None):
                                 src_block_ea = b.start_ea
                                 break
                     cfg["edges"].append({
-                        "src": src_block_ea,
-                        "dst": imp_ea,
+                        "src": hex(src_block_ea),
+                        "dst": hex(imp_ea),
                         "type": "imported-function",
                         "conditional": False
                     })
@@ -220,4 +225,5 @@ if __name__ == "__main__":
         sys.exit(1)
     
     db_path = sys.argv[1]
-    extract_cfg_from_db(db_path)
+    out_path = sys.argv[2] if len(sys.argv) > 2 else None
+    extract_cfg_from_db(db_path, out_path)

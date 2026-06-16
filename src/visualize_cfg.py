@@ -39,7 +39,7 @@ def load_cfg(json_path) -> nx.DiGraph:
     G = nx.DiGraph()
 
     # Pre-calculate continuous colors based on function addresses
-    sorted_func_eas = sorted(data['functions'].keys(), key=lambda x: int(x))
+    sorted_func_eas = sorted(data['functions'].keys(), key=lambda x: int(x, 16))
     cmap = colormaps['turbo']
 
     func_colors = {}
@@ -51,12 +51,12 @@ def load_cfg(json_path) -> nx.DiGraph:
             func_colors[name] = mcolors.to_hex(cmap(val))
 
     # Add nodes (basic blocks)
-    for func_ea_str in sorted(data['functions'].keys(), key=lambda x: int(x), reverse=True):
+    for func_ea_str in sorted(data['functions'].keys(), key=lambda x: int(x, 16), reverse=True):
         func_data = data['functions'][func_ea_str]
         func_name = func_data['name']
         node_color = get_function_color(func_name, func_colors)
         for block in func_data['blocks']:
-            block_label = f"{func_name} @ {hex(block['start'])}"
+            block_label = f"{func_name} @ {block['start']}"
             G.add_node(
                 block['start'],
                 label=block_label,
@@ -64,6 +64,8 @@ def load_cfg(json_path) -> nx.DiGraph:
                 color=node_color,
                 entry_point=func_data['entry_point'],
                 non_call_links=func_data['non_call_links'],
+                id=block['id'],
+                assembly=block.get('instructions', [])
             )
 
     # Add edges
