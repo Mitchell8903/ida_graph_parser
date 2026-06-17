@@ -217,10 +217,12 @@ class GraphSummarizer:
         self._pbar = tqdm(total=total, initial=already_cached, desc="Summarizing nodes", unit="node")
 
         while remaining:
+            self._clear_recursive()
             # Find all nodes in remaining whose successors are all summarized
             ready = [n for n in remaining if self._node_is_ready(n)]
 
             if not ready:
+                print(f"remaining: {remaining} but nothing ready")
                 # No progress possible – break cycles by adding placeholders
                 # for the node in remaining with the most unsummarized predecessors
                 # (heuristic: pick nodes involved in cycles)
