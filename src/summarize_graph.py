@@ -27,22 +27,24 @@ logger = logging.getLogger(__name__)
 DEFAULT_MODEL = "gpt-4o-mini"
 DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434/v1"
 
-LEAF_SYSTEM_PROMPT = (
+FUNC_SYSTEM_PROMPT = (
     "You are a reverse-engineering assistant. "
-    "You are given a code block's aarch64 assembly instructions"
-    "Summarize the following assembly instructions concisely. "
-    "Describe what the code block does at a high level."
-    "Your audience is an expert reverse engineer who is combining these summaries to understand higher level functions"
-    "If a function follows standard ABI calling conventions don't reexplain them"
+    "You are given all basic blocks of a single function's aarch64 assembly, "
+    "along with the control flow between them. "
+    "Summarize what this function does at a high level. Be concise. "
+    "Your audience is an expert reverse engineer. "
+    "If a function follows standard ABI calling conventions don't reexplain them."
 )
 
-NODE_SYSTEM_PROMPT = (
+FUNC_WITH_DEPS_SYSTEM_PROMPT = (
     "You are a reverse-engineering assistant. "
-    "You are given a code block's aarch64 assembly instructions followed by summaries "
-    "of the blocks it branches to. Summarize the overall behavior of this code "
-    "block, incorporating what its branches do. Be concise and to the point. "
-    "your audience is an expert reverse engineer "
-    "If a function follows standard ABI calling conventions don't reexplain them "
+    "You are given all basic blocks of a single function's aarch64 assembly, "
+    "along with the control flow between them, followed by summaries of "
+    "other functions that this function calls or jumps to. "
+    "Summarize what this function does at a high level, incorporating "
+    "what the called/referenced functions do. Be concise. "
+    "Your audience is an expert reverse engineer. "
+    "If a function follows standard ABI calling conventions don't reexplain them."
 )
 
 
@@ -63,10 +65,9 @@ class GraphSummarizer:
         self.graph = graph
         if use_ollama:
             base_url = base_url or os.environ.get("OLLAMA_HOST", DEFAULT_OLLAMA_BASE_URL)
-            # Ensure the URL ends with /v1 for OpenAI compatibility
             if not base_url.rstrip("/").endswith("/v1"):
                 base_url = base_url.rstrip("/") + "/v1"
-            api_key = api_key or "ollama"  # Ollama ignores the key but OpenAI client requires one
+            api_key = api_key or "ollama"
             model = model if model != DEFAULT_MODEL else "short-context-model"
         self.model = model
         self.client = AsyncOpenAI(
@@ -75,12 +76,26 @@ class GraphSummarizer:
         )
         self.max_concurrent = max_concurrent
         self._semaphore: Optional[asyncio.Semaphore] = None
-        # node_id -> summary string
+        # func_name -> summary string
         self._summaries: dict[str, str] = {}
         self._active_requests = 0
         self._t0 = time.perf_counter()
         self._cache_path: Optional[Path] = None
         self._pbar: Optional[tqdm] = None
+        # Build function groupings: func_name -> list of node_ids
+        self._func_nodes: dict[str, list] = {}
+        for node_id, data in self.graph.nodes(data=True):
+            func_name = data.get("func", str(node_id))
+            self._func_nodes.setdefault(func_name, []).append(node_id)
+        # Build inter-function dependency graph: func_name -> set of func_names it depends on
+        self._func_deps: dict[str, set[str]] = {func: set() for func in self._func_nodes}
+        for src, dst, edata in self.graph.edges(data=True):
+            edge_type = edata.get("type", "")
+            if edge_type in ("inter-function", "non-call"):
+                src_func = self.graph.nodes[src].get("func", str(src))
+                dst_func = self.graph.nodes[dst].get("func", str(dst))
+                if src_func != dst_func:
+                    self._func_deps[src_func].add(dst_func)
 
     def _ensure_semaphore(self):
         if self._semaphore is None:
@@ -105,56 +120,73 @@ class GraphSummarizer:
                 elapsed = time.perf_counter() - start
                 self._active_requests -= 1
 
-    def _node_is_ready(self, node_id) -> bool:
-        """Check if all successors of a node are summarized (or are back-edges in cycles)."""
-        for succ in self.graph.successors(node_id):
-            if succ not in self._summaries:
+    def _func_is_ready(self, func_name: str) -> bool:
+        """Check if all inter-function dependencies of a function are summarized."""
+        for dep in self._func_deps.get(func_name, set()):
+            if dep not in self._summaries:
                 return False
         return True
 
-    async def _summarize_single_node(self, node_id) -> str:
-        """Summarize a single node whose successors are all already summarized
-        (or treated as cycle placeholders)."""
-        node_data = self.graph.nodes[node_id]
-        instrs = node_data.get("instrs", [])
-        instrs_text = "\n".join(instrs) if instrs else "(no instructions)"
-        successors = list(self.graph.successors(node_id))
+    async def _summarize_function(self, func_name: str) -> str:
+        """Summarize an entire function by passing all its blocks in one LLM call.
 
-        if not successors:
-            # Leaf node – summarize instructions directly
-            logger.info("Summarizing leaf node %s", node_id)
-            if len(instrs) < 10:
-                logger.info("Leaf node %s has few instructions, skipping LLM call", node_id)
-                summary = f"Leaf node {node_id}:\n{instrs_text}"
-            else:
-                summary = await self._call_llm(LEAF_SYSTEM_PROMPT, instrs_text, node_id=str(node_id))
-        else:
-            branches_text = ""
-            for succ in successors:
-                succ_label = self.graph.nodes[succ].get("label", str(succ))
-                edge_data = self.graph.get_edge_data(node_id, succ) or {}
+        Inter-function / non-call dependency summaries are appended when available."""
+        nodes = self._func_nodes[func_name]
+
+        # Build blocks text with intra-function control flow
+        blocks_text = ""
+        total_instrs = 0
+        for nid in nodes:
+            ndata = self.graph.nodes[nid]
+            instrs = ndata.get("instrs", [])
+            total_instrs += len(instrs)
+            label = ndata.get("label", str(nid))
+            instrs_text = "\n".join(instrs) if instrs else "(no instructions)"
+            blocks_text += f"\n--- Block {label} ---\n{instrs_text}\n"
+
+            # Add intra-function edges info
+            for succ in self.graph.successors(nid):
+                edge_data = self.graph.get_edge_data(nid, succ) or {}
                 edge_type = edge_data.get("type", "unknown")
-                conditional = edge_data.get("conditional", False)
-                branch_header = f"Branch to {succ_label} (type={edge_type}, conditional={conditional})"
-                branch_summary = self._summaries.get(succ, f"[recursive reference to {succ_label}]")
-                branches_text += f"\n--- {branch_header} ---\n{branch_summary}\n"
+                if edge_type == "intra-function":
+                    succ_label = self.graph.nodes[succ].get("label", str(succ))
+                    cond = edge_data.get("conditional", False)
+                    blocks_text += f"  -> {succ_label} (conditional={cond})\n"
 
+        # Check for inter-function dependencies
+        deps = self._func_deps.get(func_name, set())
+        deps_text = ""
+        for dep_func in deps:
+            dep_summary = self._summaries.get(dep_func, f"[recursive reference to {dep_func}]")
+            deps_text += f"\n--- Called function: {dep_func} ---\n{dep_summary}\n"
+
+        if total_instrs == 0 and not deps_text:
+            summary = f"Function {func_name}: (no instructions)"
+        elif total_instrs < 10 and not deps_text:
+            summary = f"Function {func_name}:\n{blocks_text.strip()}"
+        elif deps_text:
             user_content = (
-                f"=== Instructions ===\n{instrs_text}\n\n"
-                f"=== Branch Summaries ==={branches_text}"
+                f"=== Function: {func_name} ===\n"
+                f"=== Basic Blocks ==={blocks_text}\n"
+                f"=== Called/Referenced Function Summaries ==={deps_text}"
             )
-            logger.info("Summarizing non-leaf node %s with %d branches", node_id, len(successors))
-            summary = await self._call_llm(NODE_SYSTEM_PROMPT, user_content, node_id=str(node_id))
+            summary = await self._call_llm(FUNC_WITH_DEPS_SYSTEM_PROMPT, user_content, node_id=func_name)
+        else:
+            user_content = (
+                f"=== Function: {func_name} ===\n"
+                f"=== Basic Blocks ==={blocks_text}"
+            )
+            summary = await self._call_llm(FUNC_SYSTEM_PROMPT, user_content, node_id=func_name)
 
-        self._summaries[node_id] = summary
+        self._summaries[func_name] = summary
         self._save_cache()
         if self._pbar is not None:
             self._pbar.update(1)
         return summary
 
-    async def summarize_node(self, node_id) -> str:
-        """Public entry point – summarizes a single node (successors must already be done)."""
-        return await self._summarize_single_node(node_id)
+    async def summarize_function(self, func_name: str) -> str:
+        """Public entry point – summarizes a single function (dependencies must already be done)."""
+        return await self._summarize_function(func_name)
 
     def _load_cache(self) -> None:
         """Load cached summaries from disk if available."""
@@ -187,21 +219,25 @@ class GraphSummarizer:
     async def summarize_all(self, root: Optional[object] = None, cache_path: Optional[str | Path] = None) -> dict:
         """Summarize the entire graph using a bottom-up wave strategy.
 
-        Processes nodes in waves: first all nodes whose successors are
-        already summarized (leaves in the first wave), then nodes that
-        become unblocked as their successors complete, and so on.
+        Processes functions in waves: first all functions with no
+        inter-function dependencies (or whose dependencies are already
+        summarized), then functions that become unblocked, and so on.
 
-        Cycles are broken by inserting placeholder summaries for back-edge
-        targets once no more nodes can be unblocked naturally.
+        Cycles are broken by inserting placeholder summaries for
+        dependency targets once no more functions can be unblocked.
 
-        Returns a dict mapping node ids to their summaries.
+        Returns a dict mapping function names to their summaries.
         """
-        # Determine which nodes to summarize
+        # Determine which functions to summarize
         if root is not None:
-            # Collect all nodes reachable from root
-            nodes_to_summarize = set(nx.descendants(self.graph, root)) | {root}
+            reachable_nodes = set(nx.descendants(self.graph, root)) | {root}
+            funcs_to_summarize = set()
+            for nid in reachable_nodes:
+                func_name = self.graph.nodes[nid].get("func", str(nid))
+                if func_name in self._func_nodes:
+                    funcs_to_summarize.add(func_name)
         else:
-            nodes_to_summarize = set(self.graph.nodes())
+            funcs_to_summarize = set(self._func_nodes.keys())
 
         # Set up disk cache
         if cache_path is not None:
@@ -209,38 +245,29 @@ class GraphSummarizer:
             self._load_cache()
             self._clear_recursive()
 
-        # Remove already-cached nodes from remaining
-        remaining = set(nodes_to_summarize) - set(self._summaries.keys())
-        total = len(nodes_to_summarize)
+        # Remove already-cached functions from remaining
+        remaining = funcs_to_summarize - set(self._summaries.keys())
+        total = len(funcs_to_summarize)
         already_cached = total - len(remaining)
 
-        self._pbar = tqdm(total=total, initial=already_cached, desc="Summarizing nodes", unit="node")
+        self._pbar = tqdm(total=total, initial=already_cached, desc="Summarizing functions", unit="func")
 
         while remaining:
             self._clear_recursive()
-            # Find all nodes in remaining whose successors are all summarized
-            ready = [n for n in remaining if self._node_is_ready(n)]
+            ready = [f for f in remaining if self._func_is_ready(f)]
 
             if not ready:
-                print(f"remaining: {remaining} but nothing ready")
-                # No progress possible – break cycles by adding placeholders
-                # for the node in remaining with the most unsummarized predecessors
-                # (heuristic: pick nodes involved in cycles)
-                # Insert placeholders for all remaining nodes' unsummarized successors
-                # that are also in remaining (i.e., cycle edges)
-                for n in remaining:
-                    for succ in self.graph.successors(n):
-                        if succ in remaining and succ not in self._summaries:
-                            label = self.graph.nodes[succ].get("label", str(succ))
-                            self._summaries[succ] = f"[recursive reference to {label}]"
-                # Now find ready nodes again (all should be ready since we filled placeholders)
-                ready = [n for n in remaining if self._node_is_ready(n)]
+                logger.info("remaining: %d functions but nothing ready, breaking cycles", len(remaining))
+                for f in remaining:
+                    for dep in self._func_deps.get(f, set()):
+                        if dep in remaining and dep not in self._summaries:
+                            self._summaries[dep] = f"[recursive reference to {dep}]"
+                ready = [f for f in remaining if self._func_is_ready(f)]
                 if not ready:
-                    break  # safety: should not happen
+                    break
 
-            # Summarize all ready nodes concurrently (overwrites any placeholders)
-            logger.info("Wave: summarizing %d nodes concurrently", len(ready))
-            tasks = [self._summarize_single_node(n) for n in ready]
+            logger.info("Wave: summarizing %d functions concurrently", len(ready))
+            tasks = [self._summarize_function(f) for f in ready]
             await asyncio.gather(*tasks)
             remaining -= set(ready)
 
