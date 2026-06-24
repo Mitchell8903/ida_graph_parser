@@ -6,25 +6,8 @@ import ida_kernwin
 import ida_name
 import idaapi
 
-LLM_MODEL = "qwen2.5-coder:1.5b"
-LLM_HOST = "http://100.104.79.110:11434"  # tailscale
-REPEATABLE = True   # True => also shows at call sites; False => only at the function
 
-def query_llm(prompt):
-    """Query the LLM via HTTP requests"""
-    try:
-        url = f"{LLM_HOST}/api/generate"
-        payload = {
-            "model": LLM_MODEL,
-            "prompt": prompt,
-            "stream": False
-        }
-        response = requests.post(url, json=payload, timeout=60)
-        response.raise_for_status()
-        return response.json().get("response", "").strip()
-    except Exception as e:
-        print(f"[summaries] Error querying LLM: {e}")
-        return None
+REPEATABLE = True   
 
 
 def wrap_text(text, width=80):
