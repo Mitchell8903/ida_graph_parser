@@ -18,6 +18,7 @@ class FuncNodeInfo:
     start_ea: int
     end_ea: int
     flags: int
+    thunk: bool = False
     entry_point: bool = False
     imported: bool = False
     module: Optional[str] = None
@@ -88,13 +89,13 @@ def extract_cfg_from_db(db_path, output_path=None):
                 functions_found += 1
                 func_ea = func.start_ea
                 func_name = func.name
-                if func.flags & idaapi.FUNC_THUNK:
-                    print(f"Skipping thunk function {func_name} @ {hex(func_ea)}")
+                thunk = func.flags & idaapi.FUNC_THUNK
                 func_node_info = FuncNodeInfo(
                     name=func_name,
                     start_ea=func.start_ea,
                     end_ea=func.end_ea,
                     entry_point=func_ea in entry_addresses,
+                    thunk=thunk,
                     flags=func.flags,
                 ).to_dict()
                 # Use string representation of EA for JSON keys
@@ -214,14 +215,13 @@ def extract_cfg_from_db(db_path, output_path=None):
 
 
             # Save to file
-            if output_path is None:
-                output_path = os.path.splitext(db_path)[0] + "_cfg.json"
-                
-            with open(output_path, "w") as f:
-                json.dump(cfg, f, indent=4)
-            
-            print(f"CFG exported to {output_path}")
-            return output_path
+            if output_path is not None:
+
+                with open(output_path, "w") as f:
+                    json.dump(cfg, f, indent=4)
+
+                print(f"CFG exported to {output_path}")
+            return cfg
 
     except Exception as e:
         print(f"Error during extraction: {e}")
